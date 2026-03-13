@@ -1,0 +1,737 @@
+//@version=5
+// ============================================================================
+// RYZE ZONES v3.0 + SMT
+// ============================================================================
+// Combines two systems:
+//   1. Ryze Zones — Sunrise-based price zones for major financial exchange cities.
+//      For each enabled city, calculates astronomical sunrise, finds the 1-min
+//      candle at that time, and draws a single box from that candle's high to low.
+//   2. Ryze SMT — Divergence detection between correlated instruments at those
+//      zones. Fires when one instrument taps a zone but the compare instrument
+//      does not on the same bar.
+//
+// NOTE: For SMT to show lines on both instruments, apply this indicator to BOTH
+//       charts with mirrored compare symbols (e.g., on ES chart set compare=NQ,
+//       on NQ chart set compare=ES).
+// ============================================================================
+
+indicator("Ryze Zones v3.0 + SMT", shorttitle="RZ3+SMT", overlay=true,
+     max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// SECTION 1: CITY INPUT GROUPS
+// ============================================================================
+
+// --- NEW YORK ---
+ny_enabled       = input.bool(true, "Enable", group="NEW YORK")
+ny_color         = input.color(color.blue, "Zone Color", group="NEW YORK")
+ny_transparency  = input.int(80, "Transparency", minval=0, maxval=100, group="NEW YORK")
+ny_dst           = input.bool(true, "Daylight Saving Time (Auto)", group="NEW YORK")
+
+// --- LONDON ---
+ldn_enabled      = input.bool(true, "Enable", group="LONDON")
+ldn_color        = input.color(color.red, "Zone Color", group="LONDON")
+ldn_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="LONDON")
+ldn_dst          = input.bool(true, "Daylight Saving Time (Auto)", group="LONDON")
+
+// --- TOKYO ---
+tky_enabled      = input.bool(true, "Enable", group="TOKYO")
+tky_color        = input.color(color.orange, "Zone Color", group="TOKYO")
+tky_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="TOKYO")
+
+// --- FRANKFURT ---
+fra_enabled      = input.bool(false, "Enable", group="FRANKFURT")
+fra_color        = input.color(color.yellow, "Zone Color", group="FRANKFURT")
+fra_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="FRANKFURT")
+fra_dst          = input.bool(true, "Daylight Saving Time (Auto)", group="FRANKFURT")
+
+// --- HONG KONG ---
+hk_enabled       = input.bool(false, "Enable", group="HONG KONG")
+hk_color         = input.color(color.fuchsia, "Zone Color", group="HONG KONG")
+hk_transparency  = input.int(80, "Transparency", minval=0, maxval=100, group="HONG KONG")
+
+// --- SYDNEY ---
+syd_enabled      = input.bool(false, "Enable", group="SYDNEY")
+syd_color        = input.color(color.lime, "Zone Color", group="SYDNEY")
+syd_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="SYDNEY")
+syd_dst          = input.bool(true, "Daylight Saving Time (Auto)", group="SYDNEY")
+
+// --- SHANGHAI ---
+shg_enabled      = input.bool(false, "Enable", group="SHANGHAI")
+shg_color        = input.color(color.teal, "Zone Color", group="SHANGHAI")
+shg_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="SHANGHAI")
+
+// --- TORONTO ---
+tor_enabled      = input.bool(false, "Enable", group="TORONTO")
+tor_color        = input.color(color.aqua, "Zone Color", group="TORONTO")
+tor_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="TORONTO")
+tor_dst          = input.bool(true, "Daylight Saving Time (Auto)", group="TORONTO")
+
+// --- SINGAPORE ---
+sgp_enabled      = input.bool(false, "Enable", group="SINGAPORE")
+sgp_color        = input.color(color.olive, "Zone Color", group="SINGAPORE")
+sgp_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="SINGAPORE")
+
+// --- MUMBAI ---
+mum_enabled      = input.bool(false, "Enable", group="MUMBAI")
+mum_color        = input.color(color.maroon, "Zone Color", group="MUMBAI")
+mum_transparency = input.int(80, "Transparency", minval=0, maxval=100, group="MUMBAI")
+
+// ============================================================================
+// SECTION 2: ZONE SETTINGS
+// ============================================================================
+
+zone_lookback = input.int(5, "Days of Zones to Show", minval=1, maxval=20,
+     group="ZONE SETTINGS")
+
+// ============================================================================
+// SECTION 3: TABLE SETTINGS
+// ============================================================================
+
+show_table     = input.bool(true, "Show Info Table", group="TABLE SETTINGS")
+table_position = input.string("top_right", "Table Position",
+     options=["top_left", "top_center", "top_right",
+              "bottom_left", "bottom_center", "bottom_right"],
+     group="TABLE SETTINGS")
+table_theme    = input.string("Dark", "Table Theme",
+     options=["Dark", "Light", "Blue"], group="TABLE SETTINGS")
+table_textsize = input.string("small", "Text Size",
+     options=["tiny", "small", "normal", "large"], group="TABLE SETTINGS")
+
+// ============================================================================
+// SECTION 4: SMT SETTINGS
+// ============================================================================
+
+show_smt          = input.bool(true, "Enable Ryze SMT", group="RYZE SMT")
+smt_symbol_choice = input.string("NQ1!", "Compare Symbol",
+     options=["ES1!", "NQ1!", "YM1!", "RTY1!", "SPY", "QQQ", "DIA", "IWM", "Custom"],
+     group="RYZE SMT")
+smt_custom_symbol = input.string("", "Custom Symbol", group="RYZE SMT")
+smt_color         = input.color(color.white, "SMT Line Color", group="RYZE SMT")
+smt_line_style_in = input.string("Dashed", "Line Style",
+     options=["Solid", "Dashed", "Dotted"], group="RYZE SMT")
+smt_line_width    = input.int(1, "Line Width", minval=1, maxval=4, group="RYZE SMT")
+
+// Resolve the compare symbol string — fallback to current ticker if empty
+// (prevents request.security() from failing with an empty string)
+smt_symbol_raw = smt_symbol_choice == "Custom" ? smt_custom_symbol : smt_symbol_choice
+smt_symbol = str.length(smt_symbol_raw) > 0 ? smt_symbol_raw : syminfo.tickerid
+
+// Resolve line style enum
+smt_line_style = smt_line_style_in == "Solid" ? line.style_solid :
+     smt_line_style_in == "Dotted" ? line.style_dotted : line.style_dashed
+
+// ============================================================================
+// SECTION 5: ASTRONOMICAL SUNRISE FUNCTIONS
+// ============================================================================
+
+// --- 5a: Day of Year ---
+// Converts year/month/day to integer 1-365 (ignores leap second).
+getDayOfYear(int y, int m, int d) =>
+    // Days in each month (non-leap). Leap adjustment added below.
+    int result = d
+    if m > 1
+        result += 31
+    if m > 2
+        result += 28
+        // Leap year check
+        if (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
+            result += 1
+    if m > 3
+        result += 31
+    if m > 4
+        result += 30
+    if m > 5
+        result += 31
+    if m > 6
+        result += 30
+    if m > 7
+        result += 31
+    if m > 8
+        result += 31
+    if m > 9
+        result += 30
+    if m > 10
+        result += 31
+    if m > 11
+        result += 30
+    result
+
+// --- 5b: Solar Declination (Spencer's Fourier Series) ---
+// Returns declination in degrees.
+getSolarDeclination(int doy) =>
+    float B = (2.0 * math.pi / 365.0) * (doy - 1)
+    float decl_rad = 0.006918 - 0.399912 * math.cos(B) +
+         0.070257 * math.sin(B) - 0.006758 * math.cos(2.0 * B) +
+         0.000907 * math.sin(2.0 * B) - 0.002697 * math.cos(3.0 * B) +
+         0.00148 * math.sin(3.0 * B)
+    float decl_deg = decl_rad * (180.0 / math.pi)
+    decl_deg
+
+// --- 5c: Equation of Time (Spencer's approximation) ---
+// Returns EoT in minutes.
+getEquationOfTime(int doy) =>
+    float B = (2.0 * math.pi / 365.0) * (doy - 1)
+    float eot = 229.18 * (0.000075 + 0.001868 * math.cos(B) -
+         0.032077 * math.sin(B) - 0.014615 * math.cos(2.0 * B) -
+         0.04089 * math.sin(2.0 * B))
+    eot
+
+// --- 5d: Hour Angle for Sunrise ---
+// Returns hour angle in degrees. Uses -0.833 deg for atmospheric refraction.
+// Returns na if the sun never rises (polar regions).
+getHourAngle(float lat_deg, float decl_deg) =>
+    float lat_rad = lat_deg * (math.pi / 180.0)
+    float decl_rad = decl_deg * (math.pi / 180.0)
+    float zenith_rad = 90.833 * (math.pi / 180.0)
+    float cos_ha = (math.cos(zenith_rad) / (math.cos(lat_rad) * math.cos(decl_rad))) -
+         math.tan(lat_rad) * math.tan(decl_rad)
+    // Clamp to [-1, 1] to avoid NaN from acos
+    float cos_ha_clamped = math.max(-1.0, math.min(1.0, cos_ha))
+    float ha_rad = math.acos(cos_ha_clamped)
+    float ha_deg = ha_rad * (180.0 / math.pi)
+    ha_deg
+
+// --- 5e: Sunrise in UTC hours ---
+// Returns sunrise time as a float in hours (0.0 - 24.0 UTC).
+getSunriseUTC(float lat, float lon, int doy) =>
+    float decl = getSolarDeclination(doy)
+    float eot = getEquationOfTime(doy)
+    float ha = getHourAngle(lat, decl)
+    float sunriseLocalSolar = 12.0 - (ha / 15.0)
+    float sunriseLocalMean = sunriseLocalSolar - (eot / 60.0)
+    float longitudeCorrection = -lon / 15.0
+    float sunriseUTC = sunriseLocalMean + longitudeCorrection
+    // Normalize to 0-24
+    float normalized = sunriseUTC % 24.0
+    if normalized < 0.0
+        normalized += 24.0
+    normalized
+
+// --- 5f: UTC to Local Time ---
+// Adds timezone offset (including DST) to UTC hours.
+utcToLocal(float utcHours, float tzOffset) =>
+    float localHours = utcHours + tzOffset
+    // Normalize to 0-24
+    float normalized = localHours % 24.0
+    if normalized < 0.0
+        normalized += 24.0
+    normalized
+
+// --- 5g: Convert sunrise hour to Unix timestamp for a given date ---
+// dateTimestamp = timestamp of the start of the day in UTC (00:00:00 UTC).
+// sunriseUTCHours = sunrise time in UTC hours (float).
+// Returns Unix timestamp in milliseconds.
+getSunriseTimestamp(int dateTimestampMs, float sunriseUTCHours) =>
+    int sunriseHour = math.floor(sunriseUTCHours)
+    int sunriseMinute = math.round((sunriseUTCHours - sunriseHour) * 60.0)
+    int result = dateTimestampMs + sunriseHour * 3600000 + sunriseMinute * 60000
+    result
+
+// ============================================================================
+// SECTION 6: DST AUTO-DETECTION HELPER
+// ============================================================================
+
+// Returns the UTC offset (in hours) for a city, accounting for DST if enabled.
+// dstType: 0=no DST, 1=US rules, 2=UK/EU rules, 3=Australia rules
+// stdOffset: standard timezone offset in hours from UTC
+// manualDst: user's DST toggle (true = auto-detect DST, false = always standard)
+
+// Helper: get day of week for a date (0=Sunday, 6=Saturday) using Tomohiko Sakamoto's algorithm
+getDayOfWeek(int y, int m, int d) =>
+    array<int> t_arr = array.from(0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4)
+    int yy = m < 3 ? y - 1 : y
+    int result = (yy + math.floor(yy / 4) - math.floor(yy / 100) + math.floor(yy / 400) + array.get(t_arr, m - 1) + d) % 7
+    result
+
+// Find the Nth occurrence of a given weekday in a month, or the last occurrence.
+// weekday: 0=Sunday. If n=0, find the LAST occurrence.
+getNthWeekday(int y, int m, int weekday, int n) =>
+    int result = 0
+    if n == 0
+        // Last occurrence: start from end of month
+        int daysInMonth = switch m
+            1 => 31
+            2 => (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0) ? 29 : 28
+            3 => 31
+            4 => 30
+            5 => 31
+            6 => 30
+            7 => 31
+            8 => 31
+            9 => 30
+            10 => 31
+            11 => 30
+            12 => 31
+            => 30
+        int day = daysInMonth
+        for i = 0 to 6
+            if getDayOfWeek(y, m, day - i) == weekday
+                result := day - i
+                break
+    else
+        // Nth occurrence: find the first, then add (n-1)*7
+        int firstDay = 1
+        for i = 0 to 6
+            if getDayOfWeek(y, m, 1 + i) == weekday
+                firstDay := 1 + i
+                break
+        result := firstDay + (n - 1) * 7
+    result
+
+// Determine if a given date is in DST for a given DST rule type
+isDST(int y, int m, int d, int dstType) =>
+    bool result = false
+    if dstType == 1
+        // US DST: 2nd Sunday of March to 1st Sunday of November
+        int marchStart = getNthWeekday(y, 3, 0, 2)
+        int novEnd = getNthWeekday(y, 11, 0, 1)
+        if m > 3 and m < 11
+            result := true
+        else if m == 3 and d >= marchStart
+            result := true
+        else if m == 11 and d < novEnd
+            result := true
+    else if dstType == 2
+        // UK/EU: Last Sunday of March to last Sunday of October
+        int marchStart = getNthWeekday(y, 3, 0, 0)
+        int octEnd = getNthWeekday(y, 10, 0, 0)
+        if m > 3 and m < 10
+            result := true
+        else if m == 3 and d >= marchStart
+            result := true
+        else if m == 10 and d < octEnd
+            result := true
+    else if dstType == 3
+        // Australia AEDT: 1st Sunday of October to 1st Sunday of April
+        // Southern hemisphere: DST is Oct-Apr (summer)
+        int octStart = getNthWeekday(y, 10, 0, 1)
+        int aprEnd = getNthWeekday(y, 4, 0, 1)
+        if m > 10 or m < 4
+            result := true
+        else if m == 10 and d >= octStart
+            result := true
+        else if m == 4 and d < aprEnd
+            result := true
+    result
+
+// Get the effective UTC offset for a city
+getEffectiveOffset(float stdOffset, int dstType, bool manualDst, int y, int m, int d) =>
+    float offset = stdOffset
+    if dstType != 0 and manualDst
+        if isDST(y, m, d, dstType)
+            offset := stdOffset + 1.0
+    offset
+
+// ============================================================================
+// SECTION 7: 1-MINUTE DATA STORAGE
+// ============================================================================
+
+// We store 1-min candle data in arrays for lookup by timestamp.
+// These arrays hold data from request.security on the "1" timeframe.
+
+var array<float> min1_highs = array.new<float>(0)
+var array<float> min1_lows = array.new<float>(0)
+var array<int>   min1_times = array.new<int>(0)
+
+// Compare symbol 1-min arrays
+var array<float> cmp_min1_highs = array.new<float>(0)
+var array<float> cmp_min1_lows = array.new<float>(0)
+var array<int>   cmp_min1_times = array.new<int>(0)
+
+// Cap arrays at 10000 entries
+capArray_float(array<float> arr, int maxSize) =>
+    if array.size(arr) > maxSize
+        array.shift(arr)
+
+capArray_int(array<int> arr, int maxSize) =>
+    if array.size(arr) > maxSize
+        array.shift(arr)
+
+// ============================================================================
+// SECTION 8: request.security() CALLS — ALL IN GLOBAL SCOPE
+// ============================================================================
+
+// Current symbol 1-min data
+[cur_min1_h, cur_min1_l, cur_min1_t] = request.security(syminfo.tickerid, "1",
+     [high, low, time])
+
+// Compare symbol current-timeframe data (for SMT tap detection)
+[cmp_h, cmp_l] = request.security(smt_symbol, timeframe.period,
+     [high, low])
+
+// Compare symbol 1-min data (for building compare symbol's zones)
+[cmp_m1_h, cmp_m1_l, cmp_m1_t] = request.security(smt_symbol, "1",
+     [high, low, time])
+
+// ============================================================================
+// SECTION 8b: POPULATE 1-MINUTE ARRAYS
+// ============================================================================
+
+// Push current symbol 1-min data
+if not na(cur_min1_t)
+    array.push(min1_highs, cur_min1_h)
+    array.push(min1_lows, cur_min1_l)
+    array.push(min1_times, int(cur_min1_t))
+    capArray_float(min1_highs, 10000)
+    capArray_float(min1_lows, 10000)
+    capArray_int(min1_times, 10000)
+
+// Push compare symbol 1-min data
+if not na(cmp_m1_t)
+    array.push(cmp_min1_highs, cmp_m1_h)
+    array.push(cmp_min1_lows, cmp_m1_l)
+    array.push(cmp_min1_times, int(cmp_m1_t))
+    capArray_float(cmp_min1_highs, 10000)
+    capArray_float(cmp_min1_lows, 10000)
+    capArray_int(cmp_min1_times, 10000)
+
+// ============================================================================
+// SECTION 9: ZONE DRAWING
+// ============================================================================
+
+// Persistent arrays to hold all drawn boxes and labels for cleanup
+var array<box>   allBoxes  = array.new<box>(0)
+var array<label> allLabels = array.new<label>(0)
+
+// Persistent arrays to hold zone highs/lows for SMT tap detection (current symbol)
+var array<float> zone_highs = array.new<float>(0)
+var array<float> zone_lows  = array.new<float>(0)
+
+// Persistent arrays for compare symbol zone highs/lows
+var array<float> cmp_zone_highs = array.new<float>(0)
+var array<float> cmp_zone_lows  = array.new<float>(0)
+
+// Table data arrays (for the info table) — store data for each city
+var array<string> tbl_city_names    = array.new<string>(0)
+var array<string> tbl_sunrise_times = array.new<string>(0)
+var array<float>  tbl_highs         = array.new<float>(0)
+var array<float>  tbl_lows          = array.new<float>(0)
+var array<bool>   tbl_enabled       = array.new<bool>(0)
+
+// Global table variable (must be declared outside if blocks for proper persistence)
+var table infoTable = na
+
+// Find the 1-min candle closest to a target timestamp (within 2 minutes tolerance).
+// Returns [high, low] or [na, na] if not found.
+findMinuteCandle(array<int> times, array<float> highs, array<float> lows, int targetTs) =>
+    float foundHigh = na
+    float foundLow = na
+    int sz = array.size(times)
+    if sz > 0
+        // Search backwards (most recent first) for efficiency
+        // Limit search to last 1500 entries to avoid loop iteration limits
+        int tolerance = 120000  // 2 minutes in ms
+        int searchStart = sz - 1
+        int searchEnd = math.max(0, sz - 1500)
+        for i = searchStart to searchEnd
+            int ts = array.get(times, i)
+            int diff = math.abs(ts - targetTs)
+            if diff <= tolerance
+                foundHigh := array.get(highs, i)
+                foundLow := array.get(lows, i)
+                break
+            // If we've gone too far back, stop searching
+            if ts < targetTs - tolerance
+                break
+    [foundHigh, foundLow]
+
+// ============================================================================
+// SECTION 10: MAIN ZONE DRAWING LOGIC (runs on last bar only for efficiency)
+// ============================================================================
+
+if barstate.islast
+    // --- Clean up previous drawings ---
+    for i = 0 to array.size(allBoxes) - 1
+        box.delete(array.get(allBoxes, i))
+    array.clear(allBoxes)
+    for i = 0 to array.size(allLabels) - 1
+        label.delete(array.get(allLabels, i))
+    array.clear(allLabels)
+
+    // Clear zone arrays for SMT
+    array.clear(zone_highs)
+    array.clear(zone_lows)
+    array.clear(cmp_zone_highs)
+    array.clear(cmp_zone_lows)
+
+    // Clear table data
+    array.clear(tbl_city_names)
+    array.clear(tbl_sunrise_times)
+    array.clear(tbl_highs)
+    array.clear(tbl_lows)
+    array.clear(tbl_enabled)
+
+    // Get current date info
+    int curYear  = year
+    int curMonth = month
+    int curDay   = dayofmonth
+
+    // --- City data: name, lat, lon, stdOffset, dstType, enabled, color, transp, dstToggle ---
+    // We'll iterate through days and cities procedurally.
+    // Due to Pine Script limitations (no arrays of tuples easily), we use parallel arrays.
+
+    // City parameters
+    var array<string> city_names   = array.from("New York", "London", "Tokyo", "Frankfurt", "Hong Kong", "Sydney", "Shanghai", "Toronto", "Singapore", "Mumbai")
+    var array<float>  city_lats    = array.from(40.7128, 51.5074, 35.6762, 50.1109, 22.3193, -33.8688, 31.2304, 43.6532, 1.3521, 19.076)
+    var array<float>  city_lons    = array.from(-74.006, -0.1278, 139.6503, 8.6821, 114.1694, 151.2093, 121.4737, -79.3832, 103.8198, 72.8777)
+    var array<float>  city_offsets = array.from(-5.0, 0.0, 9.0, 1.0, 8.0, 10.0, 8.0, -5.0, 8.0, 5.5)
+    var array<int>    city_dst     = array.from(1, 2, 0, 2, 0, 3, 0, 1, 0, 0) // 0=none, 1=US, 2=EU, 3=AU
+
+    // We need to read the dynamic inputs per city. Since Pine can't index into input variables,
+    // we build arrays from the input values.
+    array<bool>  city_enabled = array.from(ny_enabled, ldn_enabled, tky_enabled, fra_enabled, hk_enabled, syd_enabled, shg_enabled, tor_enabled, sgp_enabled, mum_enabled)
+    array<color> city_colors  = array.from(ny_color, ldn_color, tky_color, fra_color, hk_color, syd_color, shg_color, tor_color, sgp_color, mum_color)
+    array<int>   city_transp  = array.from(ny_transparency, ldn_transparency, tky_transparency, fra_transparency, hk_transparency, syd_transparency, shg_transparency, tor_transparency, sgp_transparency, mum_transparency)
+    array<bool>  city_dst_on  = array.from(ny_dst, ldn_dst, true, fra_dst, true, syd_dst, true, tor_dst, true, true)
+    // Note: cities without DST have their toggle defaulted to true but dstType=0 so it won't matter.
+
+    int numCities = 10
+
+    // Iterate over the lookback days
+    for dayOffset = 0 to zone_lookback - 1
+        // Calculate the date for this day offset
+        int dayMs = 86400000  // milliseconds in a day
+        int todayStartMs = timestamp("UTC", curYear, curMonth, curDay, 0, 0, 0)
+        int targetDayMs = todayStartMs - dayOffset * dayMs
+
+        // Extract year/month/day from the target timestamp
+        int tgtYear  = year(targetDayMs, "UTC")
+        int tgtMonth = month(targetDayMs, "UTC")
+        int tgtDay   = dayofmonth(targetDayMs, "UTC")
+        int doy = getDayOfYear(tgtYear, tgtMonth, tgtDay)
+
+        // For each city
+        for c = 0 to numCities - 1
+            bool enabled = array.get(city_enabled, c)
+            string cname = array.get(city_names, c)
+            float lat = array.get(city_lats, c)
+            float lon = array.get(city_lons, c)
+            float stdOff = array.get(city_offsets, c)
+            int dstType = array.get(city_dst, c)
+            bool dstOn = array.get(city_dst_on, c)
+            color clr = array.get(city_colors, c)
+            int transp = array.get(city_transp, c)
+
+            // Calculate effective offset
+            float effOffset = getEffectiveOffset(stdOff, dstType, dstOn, tgtYear, tgtMonth, tgtDay)
+
+            // Calculate sunrise UTC
+            float sunriseUTC = getSunriseUTC(lat, lon, doy)
+            float sunriseLocal = utcToLocal(sunriseUTC, effOffset)
+
+            // Get sunrise timestamp in ms (UTC)
+            int sunriseTs = getSunriseTimestamp(targetDayMs, sunriseUTC)
+
+            // Find the 1-min candle at sunrise for current symbol
+            [zHigh, zLow] = findMinuteCandle(min1_times, min1_highs, min1_lows, sunriseTs)
+
+            // Find the 1-min candle at sunrise for compare symbol
+            [czHigh, czLow] = findMinuteCandle(cmp_min1_times, cmp_min1_highs, cmp_min1_lows, sunriseTs)
+
+            if enabled and not na(zHigh) and not na(zLow)
+                // Draw the zone box
+                color boxColor = color.new(clr, transp)
+                box zoneBox = box.new(sunriseTs, zHigh, sunriseTs + dayMs, zLow,
+                     bgcolor=boxColor, border_color=color.new(clr, math.max(0, transp - 20)),
+                     border_width=1, extend=extend.right, xloc=xloc.bar_time)
+                array.push(allBoxes, zoneBox)
+
+                // Label at the left edge of the box
+                label zoneLabel = label.new(sunriseTs, zHigh, cname,
+                     style=label.style_none, textcolor=clr,
+                     size=size.tiny, xloc=xloc.bar_time)
+                array.push(allLabels, zoneLabel)
+
+                // Store zone levels for SMT
+                array.push(zone_highs, zHigh)
+                array.push(zone_lows, zLow)
+
+            // Store compare symbol zone levels for SMT (regardless of current symbol enabled)
+            if show_smt and not na(czHigh) and not na(czLow)
+                array.push(cmp_zone_highs, czHigh)
+                array.push(cmp_zone_lows, czLow)
+
+            // Store table data (only for today, dayOffset==0)
+            if dayOffset == 0
+                array.push(tbl_city_names, cname)
+                array.push(tbl_enabled, enabled and not na(zHigh))
+                int srHour = math.floor(sunriseLocal)
+                int srMin = math.round((sunriseLocal - srHour) * 60.0)
+                string hrStr = srHour < 10 ? "0" + str.tostring(srHour) : str.tostring(srHour)
+                string mnStr = srMin < 10 ? "0" + str.tostring(srMin) : str.tostring(srMin)
+                string srStr = hrStr + ":" + mnStr
+                array.push(tbl_sunrise_times, srStr)
+                array.push(tbl_highs, enabled ? zHigh : na)
+                array.push(tbl_lows, enabled ? zLow : na)
+
+// ============================================================================
+// SECTION 11: SMT LOGIC
+// ============================================================================
+
+// SMT runs on every bar (not just last), but we need zone levels.
+// Since zones are drawn on barstate.islast, for SMT we use a simplified approach:
+// We calculate today's zones inline and check taps.
+
+// For SMT to work on each bar, we compute zone levels for today's sunrise candles.
+// We re-derive sunrise timestamps and look up the 1-min candles.
+
+// Persistent SMT line storage for cleanup
+var array<line>  smt_lines  = array.new<line>(0)
+var array<label> smt_labels_arr = array.new<label>(0)
+
+// SMT detection — only on barstate.islast to avoid excess drawing
+if barstate.islast and show_smt and str.length(smt_symbol_raw) > 0 and smt_symbol != syminfo.tickerid
+    // We already have zone_highs/zone_lows and cmp_zone_highs/cmp_zone_lows from above.
+    // Check if the current bar taps any current symbol zone
+    bool curTaps = false
+    int curTapIdx = -1
+    float curTapZoneHigh = na
+    float curTapZoneLow = na
+    int zoneCount = array.size(zone_highs)
+    for i = 0 to math.max(0, zoneCount - 1)
+        if zoneCount > 0
+            float zh = array.get(zone_highs, i)
+            float zl = array.get(zone_lows, i)
+            if not na(zh) and not na(zl)
+                if low <= zh and high >= zl
+                    curTaps := true
+                    curTapIdx := i
+                    curTapZoneHigh := zh
+                    curTapZoneLow := zl
+                    break
+
+    // Check if compare symbol taps any of ITS zones
+    bool cmpTaps = false
+    int cmpZoneCount = array.size(cmp_zone_highs)
+    for i = 0 to math.max(0, cmpZoneCount - 1)
+        if cmpZoneCount > 0
+            float czh = array.get(cmp_zone_highs, i)
+            float czl = array.get(cmp_zone_lows, i)
+            if not na(czh) and not na(czl)
+                if cmp_l <= czh and cmp_h >= czl
+                    cmpTaps := true
+                    break
+
+    // SMT fires when one taps and the other does not
+    if curTaps and not cmpTaps
+        // Current symbol tapped a zone, compare did not => SMT divergence
+        // Determine if price came from above or below
+        float zoneMid = (curTapZoneHigh + curTapZoneLow) / 2.0
+        float lineLevel = close > zoneMid ? low : high
+
+        line smtLine = line.new(time, lineLevel, time + 86400000, lineLevel,
+             xloc=xloc.bar_time, color=smt_color,
+             style=smt_line_style, width=smt_line_width, extend=extend.right)
+        array.push(smt_lines, smtLine)
+
+        label smtLbl = label.new(time, lineLevel, "Ryze SMT",
+             xloc=xloc.bar_time, style=label.style_none,
+             textcolor=smt_color, size=size.small)
+        array.push(smt_labels_arr, smtLbl)
+
+    else if cmpTaps and not curTaps
+        // Compare tapped but current did not => also SMT divergence
+        // Use current symbol's price level where the non-tap occurred
+        float lineLevel = (high + low) / 2.0
+        line smtLine = line.new(time, lineLevel, time + 86400000, lineLevel,
+             xloc=xloc.bar_time, color=smt_color,
+             style=smt_line_style, width=smt_line_width, extend=extend.right)
+        array.push(smt_lines, smtLine)
+
+        label smtLbl = label.new(time, lineLevel, "Ryze SMT",
+             xloc=xloc.bar_time, style=label.style_none,
+             textcolor=smt_color, size=size.small)
+        array.push(smt_labels_arr, smtLbl)
+
+    // Cleanup: cap SMT lines at 450 to stay within 500 limit
+    while array.size(smt_lines) > 450
+        line.delete(array.get(smt_lines, 0))
+        array.shift(smt_lines)
+    while array.size(smt_labels_arr) > 450
+        label.delete(array.get(smt_labels_arr, 0))
+        array.shift(smt_labels_arr)
+
+// ============================================================================
+// SECTION 12: INFORMATION TABLE
+// ============================================================================
+
+if barstate.islast and show_table
+    // Delete old table before creating a new one
+    if not na(infoTable)
+        table.delete(infoTable)
+
+    // Resolve table position
+    string pos = switch table_position
+        "top_left"      => position.top_left
+        "top_center"    => position.top_center
+        "top_right"     => position.top_right
+        "bottom_left"   => position.bottom_left
+        "bottom_center" => position.bottom_center
+        "bottom_right"  => position.bottom_right
+        => position.top_right
+
+    // Resolve text size
+    string txtSize = switch table_textsize
+        "tiny"   => size.tiny
+        "small"  => size.small
+        "normal" => size.normal
+        "large"  => size.large
+        => size.small
+
+    // Theme colors
+    color bgColor = switch table_theme
+        "Dark"  => color.new(color.black, 20)
+        "Light" => color.new(color.white, 20)
+        "Blue"  => color.new(#1a237e, 20)
+        => color.new(color.black, 20)
+
+    color txtColor = switch table_theme
+        "Dark"  => color.white
+        "Light" => color.black
+        "Blue"  => color.white
+        => color.white
+
+    color headerBg = switch table_theme
+        "Dark"  => color.new(#333333, 0)
+        "Light" => color.new(#e0e0e0, 0)
+        "Blue"  => color.new(#283593, 0)
+        => color.new(#333333, 0)
+
+    int numRows = array.size(tbl_city_names)
+    infoTable := table.new(pos, 5, numRows + 1, border_width=1, border_color=color.gray)
+
+    // Header row
+    table.cell(infoTable, 0, 0, "City",    text_color=txtColor, bgcolor=headerBg, text_size=txtSize)
+    table.cell(infoTable, 1, 0, "Sunrise",  text_color=txtColor, bgcolor=headerBg, text_size=txtSize)
+    table.cell(infoTable, 2, 0, "High",     text_color=txtColor, bgcolor=headerBg, text_size=txtSize)
+    table.cell(infoTable, 3, 0, "Low",      text_color=txtColor, bgcolor=headerBg, text_size=txtSize)
+    table.cell(infoTable, 4, 0, "Range",    text_color=txtColor, bgcolor=headerBg, text_size=txtSize)
+
+    // Data rows
+    for i = 0 to math.max(0, numRows - 1)
+        if numRows > 0
+            string cityName = array.get(tbl_city_names, i)
+            bool isEnabled = array.get(tbl_enabled, i)
+            if isEnabled
+                string srTime = array.get(tbl_sunrise_times, i)
+                float hi = array.get(tbl_highs, i)
+                float lo = array.get(tbl_lows, i)
+                float rng = not na(hi) and not na(lo) ? hi - lo : na
+                table.cell(infoTable, 0, i + 1, cityName,                              text_color=txtColor, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 1, i + 1, srTime,                                text_color=txtColor, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 2, i + 1, not na(hi) ? str.tostring(hi, format.mintick) : "x", text_color=txtColor, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 3, i + 1, not na(lo) ? str.tostring(lo, format.mintick) : "x", text_color=txtColor, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 4, i + 1, not na(rng) ? str.tostring(rng, format.mintick) : "x", text_color=txtColor, bgcolor=bgColor, text_size=txtSize)
+            else
+                table.cell(infoTable, 0, i + 1, cityName, text_color=color.gray, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 1, i + 1, "x",      text_color=color.gray, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 2, i + 1, "x",      text_color=color.gray, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 3, i + 1, "x",      text_color=color.gray, bgcolor=bgColor, text_size=txtSize)
+                table.cell(infoTable, 4, i + 1, "x",      text_color=color.gray, bgcolor=bgColor, text_size=txtSize)
+
+// ============================================================================
+// SECTION 13: REQUIRED PLOT STATEMENT
+// ============================================================================
+
+plot(na)
