@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 // ============================================================================
 // RYZE ZONES v3.0 + SMT
 // ============================================================================
@@ -114,8 +114,10 @@ smt_line_width    = input.int(1, "Line Width", minval=1, maxval=4, group="RYZE S
 
 // Resolve the compare symbol string — fallback to current ticker if empty
 // (prevents request.security() from failing with an empty string)
+// Use ticker.standard() to normalize tickerid for reliable comparisons
 smt_symbol_raw = smt_symbol_choice == "Custom" ? smt_custom_symbol : smt_symbol_choice
 smt_symbol = str.length(smt_symbol_raw) > 0 ? smt_symbol_raw : syminfo.tickerid
+currentTickerStd = ticker.standard(syminfo.tickerid)
 
 // Resolve line style enum
 smt_line_style = smt_line_style_in == "Solid" ? line.style_solid :
@@ -442,12 +444,11 @@ findMinuteCandle(array<int> times, array<float> highs, array<float> lows, int ta
 
 if barstate.islast
     // --- Clean up previous drawings ---
-    for i = 0 to array.size(allBoxes) - 1
-        box.delete(array.get(allBoxes, i))
-    array.clear(allBoxes)
-    for i = 0 to array.size(allLabels) - 1
-        label.delete(array.get(allLabels, i))
-    array.clear(allLabels)
+    // Use while-loop to safely handle empty arrays (for 0 to -1 can execute once in Pine)
+    while array.size(allBoxes) > 0
+        box.delete(array.pop(allBoxes))
+    while array.size(allLabels) > 0
+        label.delete(array.pop(allLabels))
 
     // Clear zone arrays for SMT
     array.clear(zone_highs)
@@ -581,7 +582,7 @@ var array<line>  smt_lines  = array.new<line>(0)
 var array<label> smt_labels_arr = array.new<label>(0)
 
 // SMT detection — only on barstate.islast to avoid excess drawing
-if barstate.islast and show_smt and str.length(smt_symbol_raw) > 0 and smt_symbol != syminfo.tickerid
+if barstate.islast and show_smt and str.length(smt_symbol_raw) > 0 and smt_symbol != currentTickerStd
     // We already have zone_highs/zone_lows and cmp_zone_highs/cmp_zone_lows from above.
     // Check if the current bar taps any current symbol zone
     bool curTaps = false
@@ -589,8 +590,8 @@ if barstate.islast and show_smt and str.length(smt_symbol_raw) > 0 and smt_symbo
     float curTapZoneHigh = na
     float curTapZoneLow = na
     int zoneCount = array.size(zone_highs)
-    for i = 0 to math.max(0, zoneCount - 1)
-        if zoneCount > 0
+    if zoneCount > 0
+        for i = 0 to zoneCount - 1
             float zh = array.get(zone_highs, i)
             float zl = array.get(zone_lows, i)
             if not na(zh) and not na(zl)
@@ -604,8 +605,8 @@ if barstate.islast and show_smt and str.length(smt_symbol_raw) > 0 and smt_symbo
     // Check if compare symbol taps any of ITS zones
     bool cmpTaps = false
     int cmpZoneCount = array.size(cmp_zone_highs)
-    for i = 0 to math.max(0, cmpZoneCount - 1)
-        if cmpZoneCount > 0
+    if cmpZoneCount > 0
+        for i = 0 to cmpZoneCount - 1
             float czh = array.get(cmp_zone_highs, i)
             float czl = array.get(cmp_zone_lows, i)
             if not na(czh) and not na(czl)
@@ -709,8 +710,8 @@ if barstate.islast and show_table
     table.cell(infoTable, 4, 0, "Range",    text_color=txtColor, bgcolor=headerBg, text_size=txtSize)
 
     // Data rows
-    for i = 0 to math.max(0, numRows - 1)
-        if numRows > 0
+    if numRows > 0
+        for i = 0 to numRows - 1
             string cityName = array.get(tbl_city_names, i)
             bool isEnabled = array.get(tbl_enabled, i)
             if isEnabled
