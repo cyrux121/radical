@@ -587,16 +587,16 @@ cmpPH  = ta.pivothigh(cmp_h, smt_swing_len, smt_swing_len)
 cmpPL  = ta.pivotlow(cmp_l, smt_swing_len, smt_swing_len)
 
 // Track last two swing highs — main instrument
-var float mainPrevHigh    = na
-var float mainLastHigh    = na
-var int   mainPrevHighIdx = na
-var int   mainLastHighIdx = na
+var float mainPrevHigh     = na
+var float mainLastHigh     = na
+var int   mainPrevHighTime = na
+var int   mainLastHighTime = na
 
 // Track last two swing lows — main instrument
-var float mainPrevLow    = na
-var float mainLastLow    = na
-var int   mainPrevLowIdx = na
-var int   mainLastLowIdx = na
+var float mainPrevLow     = na
+var float mainLastLow     = na
+var int   mainPrevLowTime = na
+var int   mainLastLowTime = na
 
 // Track last two swing highs — compare instrument
 var float cmpPrevHigh = na
@@ -608,10 +608,10 @@ var float cmpLastLow = na
 
 // Update main swing highs
 if not na(mainPH)
-    mainPrevHigh    := mainLastHigh
-    mainPrevHighIdx := mainLastHighIdx
-    mainLastHigh    := mainPH
-    mainLastHighIdx := bar_index - smt_swing_len
+    mainPrevHigh     := mainLastHigh
+    mainPrevHighTime := mainLastHighTime
+    mainLastHigh     := mainPH
+    mainLastHighTime := time[smt_swing_len]
 
 // Update compare swing highs
 if not na(cmpPH)
@@ -620,10 +620,10 @@ if not na(cmpPH)
 
 // Update main swing lows
 if not na(mainPL)
-    mainPrevLow    := mainLastLow
-    mainPrevLowIdx := mainLastLowIdx
-    mainLastLow    := mainPL
-    mainLastLowIdx := bar_index - smt_swing_len
+    mainPrevLow     := mainLastLow
+    mainPrevLowTime := mainLastLowTime
+    mainLastLow     := mainPL
+    mainLastLowTime := time[smt_swing_len]
 
 // Update compare swing lows
 if not na(cmpPL)
@@ -631,21 +631,21 @@ if not na(cmpPL)
     cmpLastLow := cmpPL
 
 // --- Bearish SMT: Main Higher High + Compare Lower High ---
-if show_smt and not na(mainPH) and not na(mainPrevHigh) and not na(mainPrevHighIdx) and not na(cmpLastHigh) and not na(cmpPrevHigh)
+if show_smt and not na(mainPH) and not na(mainPrevHigh) and not na(mainPrevHighTime) and not na(cmpLastHigh) and not na(cmpPrevHigh)
     if mainLastHigh > mainPrevHigh and cmpLastHigh < cmpPrevHigh
-        line.new(mainPrevHighIdx, mainPrevHigh, mainLastHighIdx, mainLastHigh,
-             color=smt_bear_color, style=smt_line_style, width=smt_line_width)
-        label.new(mainLastHighIdx, mainLastHigh, "SMT",
-             style=label.style_label_down, textcolor=color.white,
+        line.new(mainPrevHighTime, mainPrevHigh, mainLastHighTime, mainLastHigh,
+             xloc=xloc.bar_time, color=smt_bear_color, style=smt_line_style, width=smt_line_width)
+        label.new(mainLastHighTime, mainLastHigh, "SMT",
+             xloc=xloc.bar_time, style=label.style_label_down, textcolor=color.white,
              color=smt_bear_color, size=size.tiny)
 
 // --- Bullish SMT: Main Lower Low + Compare Higher Low ---
-if show_smt and not na(mainPL) and not na(mainPrevLow) and not na(mainPrevLowIdx) and not na(cmpLastLow) and not na(cmpPrevLow)
+if show_smt and not na(mainPL) and not na(mainPrevLow) and not na(mainPrevLowTime) and not na(cmpLastLow) and not na(cmpPrevLow)
     if mainLastLow < mainPrevLow and cmpLastLow > cmpPrevLow
-        line.new(mainPrevLowIdx, mainPrevLow, mainLastLowIdx, mainLastLow,
-             color=smt_bull_color, style=smt_line_style, width=smt_line_width)
-        label.new(mainLastLowIdx, mainLastLow, "SMT",
-             style=label.style_label_up, textcolor=color.white,
+        line.new(mainPrevLowTime, mainPrevLow, mainLastLowTime, mainLastLow,
+             xloc=xloc.bar_time, color=smt_bull_color, style=smt_line_style, width=smt_line_width)
+        label.new(mainLastLowTime, mainLastLow, "SMT",
+             xloc=xloc.bar_time, style=label.style_label_up, textcolor=color.white,
              color=smt_bull_color, size=size.tiny)
 
 // ============================================================================
