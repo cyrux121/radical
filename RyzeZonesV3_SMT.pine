@@ -355,221 +355,183 @@ getEffectiveOffset(float stdOffset, int dstType, bool manualDst, int y, int m, i
     offset
 
 // ============================================================================
-// SECTION 7: 1-MINUTE DATA STORAGE
+// SECTION 7: CITY DATA (global scope — needed for per-bar sunrise detection)
 // ============================================================================
 
-// We store 1-min candle data in arrays for lookup by timestamp.
-// These arrays hold data from request.security on the "1" timeframe.
+var array<string> city_names   = array.from("New York", "London", "Tokyo", "Frankfurt", "Hong Kong", "Sydney", "Shanghai", "Toronto", "Singapore", "Mumbai")
+var array<float>  city_lats    = array.from(40.7128, 51.5074, 35.6762, 50.1109, 22.3193, -33.8688, 31.2304, 43.6532, 1.3521, 19.076)
+var array<float>  city_lons    = array.from(-74.006, -0.1278, 139.6503, 8.6821, 114.1694, 151.2093, 121.4737, -79.3832, 103.8198, 72.8777)
+var array<float>  city_offsets = array.from(-5.0, 0.0, 9.0, 1.0, 8.0, 10.0, 8.0, -5.0, 8.0, 5.5)
+var array<int>    city_dst     = array.from(1, 2, 0, 2, 0, 3, 0, 1, 0, 0) // 0=none, 1=US, 2=EU, 3=AU
 
-var array<float> min1_highs = array.new<float>(0)
-var array<float> min1_lows = array.new<float>(0)
-var array<int>   min1_times = array.new<int>(0)
+// Input-driven arrays (constant across bars)
+array<bool>  city_enabled = array.from(ny_enabled, ldn_enabled, tky_enabled, fra_enabled, hk_enabled, syd_enabled, shg_enabled, tor_enabled, sgp_enabled, mum_enabled)
+array<color> city_colors  = array.from(ny_color, ldn_color, tky_color, fra_color, hk_color, syd_color, shg_color, tor_color, sgp_color, mum_color)
+array<int>   city_transp  = array.from(ny_transparency, ldn_transparency, tky_transparency, fra_transparency, hk_transparency, syd_transparency, shg_transparency, tor_transparency, sgp_transparency, mum_transparency)
+array<bool>  city_dst_on  = array.from(ny_dst, ldn_dst, true, fra_dst, true, syd_dst, true, tor_dst, true, true)
 
-// Compare symbol 1-min arrays
-var array<float> cmp_min1_highs = array.new<float>(0)
-var array<float> cmp_min1_lows = array.new<float>(0)
-var array<int>   cmp_min1_times = array.new<int>(0)
-
-// Cap arrays at 10000 entries
-capArray_float(array<float> arr, int maxSize) =>
-    if array.size(arr) > maxSize
-        array.shift(arr)
-
-capArray_int(array<int> arr, int maxSize) =>
-    if array.size(arr) > maxSize
-        array.shift(arr)
+int numCities = 10
 
 // ============================================================================
-// SECTION 8: request.security() CALLS — ALL IN GLOBAL SCOPE
+// SECTION 8: request.security() — COMPARE SYMBOL (for SMT)
 // ============================================================================
 
-// Current symbol 1-min data
-[cur_min1_h, cur_min1_l, cur_min1_t] = request.security(syminfo.tickerid, "1",
-     [high, low, time])
-
-// Compare symbol current-timeframe data (for SMT tap detection)
+// Compare symbol current-timeframe data (for SMT pivot detection)
 [cmp_h, cmp_l] = request.security(smt_symbol, timeframe.period,
      [high, low])
 
-// Compare symbol 1-min data (for building compare symbol's zones)
-[cmp_m1_h, cmp_m1_l, cmp_m1_t] = request.security(smt_symbol, "1",
-     [high, low, time])
+// ============================================================================
+// SECTION 9: PER-BAR SUNRISE DETECTION
+// ============================================================================
+// On each new trading day, compute sunrise timestamps for all cities.
+// Then detect the first chart bar at/after each sunrise — that bar's high/low
+// becomes the zone. This works on ANY timeframe and anchors to real prices.
+
+// Per-city sunrise timestamps for the current calendar day
+var array<int>  citySunriseTs  = array.new<int>(numCities, 0)
+var array<bool> citySunriseHit = array.new<bool>(numCities, false)
+
+// Detected sunrise bar data (persists across bars)
+var array<float>  sr_bar_highs  = array.new<float>(0)
+var array<float>  sr_bar_lows   = array.new<float>(0)
+var array<int>    sr_bar_times  = array.new<int>(0)
+var array<int>    sr_bar_cities = array.new<int>(0)
+
+// Detect calendar day change (UTC)
+int _curDayOM = dayofmonth(time, "UTC")
+bool newCalDay = barstate.isfirst or (not na(_curDayOM[1]) and _curDayOM != nz(_curDayOM[1]))
+
+if newCalDay
+    int yr = year(time, "UTC")
+    int mo = month(time, "UTC")
+    int dy = _curDayOM
+    int dayStartMs = timestamp("UTC", yr, mo, dy, 0, 0, 0)
+    for c = 0 to numCities - 1
+        array.set(citySunriseHit, c, false)
+        float lat  = array.get(city_lats, c)
+        float lon  = array.get(city_lons, c)
+        float stdO = array.get(city_offsets, c)
+        int dstT   = array.get(city_dst, c)
+        bool dstO  = array.get(city_dst_on, c)
+        float effO = getEffectiveOffset(stdO, dstT, dstO, yr, mo, dy)
+        float sHrs = getSunriseUTC(lat, lon, yr, mo, dy)
+        int sTs    = getSunriseTimestamp(dayStartMs, sHrs)
+        array.set(citySunriseTs, c, sTs)
+
+// On every bar, check if this bar is the sunrise bar for any city
+for c = 0 to numCities - 1
+    if not array.get(citySunriseHit, c)
+        int sTs = array.get(citySunriseTs, c)
+        if sTs > 0 and time >= sTs
+            array.set(citySunriseHit, c, true)
+            array.push(sr_bar_highs, high)
+            array.push(sr_bar_lows, low)
+            array.push(sr_bar_times, time)
+            array.push(sr_bar_cities, c)
+
+// Cap stored data to lookback window
+int maxEntries = zone_lookback * numCities
+while array.size(sr_bar_highs) > maxEntries
+    array.shift(sr_bar_highs)
+    array.shift(sr_bar_lows)
+    array.shift(sr_bar_times)
+    array.shift(sr_bar_cities)
 
 // ============================================================================
-// SECTION 8b: POPULATE 1-MINUTE ARRAYS
+// SECTION 10: ZONE DRAWING + TABLE DATA (runs on last bar)
 // ============================================================================
 
-// Push current symbol 1-min data
-if not na(cur_min1_t)
-    array.push(min1_highs, cur_min1_h)
-    array.push(min1_lows, cur_min1_l)
-    array.push(min1_times, int(cur_min1_t))
-    capArray_float(min1_highs, 10000)
-    capArray_float(min1_lows, 10000)
-    capArray_int(min1_times, 10000)
-
-// Push compare symbol 1-min data
-if not na(cmp_m1_t)
-    array.push(cmp_min1_highs, cmp_m1_h)
-    array.push(cmp_min1_lows, cmp_m1_l)
-    array.push(cmp_min1_times, int(cmp_m1_t))
-    capArray_float(cmp_min1_highs, 10000)
-    capArray_float(cmp_min1_lows, 10000)
-    capArray_int(cmp_min1_times, 10000)
-
-// ============================================================================
-// SECTION 9: ZONE DRAWING
-// ============================================================================
-
-// Persistent arrays to hold all drawn boxes and labels for cleanup
+// Persistent arrays for drawn objects (cleanup on redraw)
 var array<box>   allBoxes  = array.new<box>(0)
 var array<label> allLabels = array.new<label>(0)
 
-// Table data arrays (for the info table) — store data for each city
+// Table data arrays
 var array<string> tbl_city_names    = array.new<string>(0)
 var array<string> tbl_sunrise_times = array.new<string>(0)
 var array<float>  tbl_highs         = array.new<float>(0)
 var array<float>  tbl_lows          = array.new<float>(0)
 var array<bool>   tbl_enabled       = array.new<bool>(0)
 
-// Global table variable (must be declared outside if blocks for proper persistence)
+// Global table variable
 var table infoTable = na
-
-// Find the 1-min candle closest to a target timestamp (within 2 minutes tolerance).
-// Returns [high, low] or [na, na] if not found.
-findMinuteCandle(array<int> times, array<float> highs, array<float> lows, int targetTs) =>
-    float foundHigh = na
-    float foundLow = na
-    int sz = array.size(times)
-    if sz > 0
-        // Search backwards (most recent first) for efficiency
-        // Limit search to last 1500 entries to avoid loop iteration limits
-        int tolerance = 120000  // 2 minutes in ms
-        int searchStart = sz - 1
-        int searchEnd = math.max(0, sz - 1500)
-        for i = searchStart to searchEnd
-            int ts = array.get(times, i)
-            int diff = math.abs(ts - targetTs)
-            if diff <= tolerance
-                foundHigh := array.get(highs, i)
-                foundLow := array.get(lows, i)
-                break
-            // If we've gone too far back, stop searching
-            if ts < targetTs - tolerance
-                break
-    [foundHigh, foundLow]
-
-// ============================================================================
-// SECTION 10: MAIN ZONE DRAWING LOGIC (runs on last bar only for efficiency)
-// ============================================================================
 
 if barstate.islast
     // --- Clean up previous drawings ---
-    // Use while-loop to safely handle empty arrays (for 0 to -1 can execute once in Pine)
     while array.size(allBoxes) > 0
         box.delete(array.pop(allBoxes))
     while array.size(allLabels) > 0
         label.delete(array.pop(allLabels))
 
-    // Clear table data
+    // --- Draw zone boxes from detected sunrise bars ---
+    int dayMs = 86400000
+    int numDetected = array.size(sr_bar_highs)
+    if numDetected > 0
+        for i = 0 to numDetected - 1
+            int c       = array.get(sr_bar_cities, i)
+            bool enabled = array.get(city_enabled, c)
+            if enabled
+                float zHigh = array.get(sr_bar_highs, i)
+                float zLow  = array.get(sr_bar_lows, i)
+                int   zTime = array.get(sr_bar_times, i)
+                string cname = array.get(city_names, c)
+                color clr    = array.get(city_colors, c)
+                int transp   = array.get(city_transp, c)
+
+                color boxColor = color.new(clr, transp)
+                box zoneBox = box.new(zTime, zHigh, zTime + dayMs, zLow,
+                     bgcolor=boxColor, border_color=color.new(clr, math.max(0, transp - 20)),
+                     border_width=1, extend=extend.right, xloc=xloc.bar_time)
+                array.push(allBoxes, zoneBox)
+
+                label zoneLabel = label.new(zTime, zHigh, cname,
+                     style=label.style_none, textcolor=clr,
+                     size=size.tiny, xloc=xloc.bar_time)
+                array.push(allLabels, zoneLabel)
+
+    // --- Build table data (today's sunrise info for all cities) ---
     array.clear(tbl_city_names)
     array.clear(tbl_sunrise_times)
     array.clear(tbl_highs)
     array.clear(tbl_lows)
     array.clear(tbl_enabled)
 
-    // Get current date info
     int curYear  = year
     int curMonth = month
     int curDay   = dayofmonth
+    int todayStartMs = timestamp("UTC", curYear, curMonth, curDay, 0, 0, 0)
 
-    // --- City data: name, lat, lon, stdOffset, dstType, enabled, color, transp, dstToggle ---
-    // We'll iterate through days and cities procedurally.
-    // Due to Pine Script limitations (no arrays of tuples easily), we use parallel arrays.
+    for c = 0 to numCities - 1
+        string cname = array.get(city_names, c)
+        bool enabled = array.get(city_enabled, c)
+        float lat    = array.get(city_lats, c)
+        float lon    = array.get(city_lons, c)
+        float stdOff = array.get(city_offsets, c)
+        int dstType  = array.get(city_dst, c)
+        bool dstOn   = array.get(city_dst_on, c)
 
-    // City parameters
-    var array<string> city_names   = array.from("New York", "London", "Tokyo", "Frankfurt", "Hong Kong", "Sydney", "Shanghai", "Toronto", "Singapore", "Mumbai")
-    var array<float>  city_lats    = array.from(40.7128, 51.5074, 35.6762, 50.1109, 22.3193, -33.8688, 31.2304, 43.6532, 1.3521, 19.076)
-    var array<float>  city_lons    = array.from(-74.006, -0.1278, 139.6503, 8.6821, 114.1694, 151.2093, 121.4737, -79.3832, 103.8198, 72.8777)
-    var array<float>  city_offsets = array.from(-5.0, 0.0, 9.0, 1.0, 8.0, 10.0, 8.0, -5.0, 8.0, 5.5)
-    var array<int>    city_dst     = array.from(1, 2, 0, 2, 0, 3, 0, 1, 0, 0) // 0=none, 1=US, 2=EU, 3=AU
+        float effOffset  = getEffectiveOffset(stdOff, dstType, dstOn, curYear, curMonth, curDay)
+        float sunriseUTC = getSunriseUTC(lat, lon, curYear, curMonth, curDay)
+        float sunriseLocal = utcToLocal(sunriseUTC, effOffset)
 
-    // We need to read the dynamic inputs per city. Since Pine can't index into input variables,
-    // we build arrays from the input values.
-    array<bool>  city_enabled = array.from(ny_enabled, ldn_enabled, tky_enabled, fra_enabled, hk_enabled, syd_enabled, shg_enabled, tor_enabled, sgp_enabled, mum_enabled)
-    array<color> city_colors  = array.from(ny_color, ldn_color, tky_color, fra_color, hk_color, syd_color, shg_color, tor_color, sgp_color, mum_color)
-    array<int>   city_transp  = array.from(ny_transparency, ldn_transparency, tky_transparency, fra_transparency, hk_transparency, syd_transparency, shg_transparency, tor_transparency, sgp_transparency, mum_transparency)
-    array<bool>  city_dst_on  = array.from(ny_dst, ldn_dst, true, fra_dst, true, syd_dst, true, tor_dst, true, true)
-    // Note: cities without DST have their toggle defaulted to true but dstType=0 so it won't matter.
+        // Find today's zone high/low for this city from detected data
+        float todayHigh = na
+        float todayLow  = na
+        if numDetected > 0
+            for i = 0 to numDetected - 1
+                if array.get(sr_bar_cities, i) == c and array.get(sr_bar_times, i) >= todayStartMs
+                    todayHigh := array.get(sr_bar_highs, i)
+                    todayLow  := array.get(sr_bar_lows, i)
+                    break
 
-    int numCities = 10
-
-    // Iterate over the lookback days
-    for dayOffset = 0 to zone_lookback - 1
-        // Calculate the date for this day offset
-        int dayMs = 86400000  // milliseconds in a day
-        int todayStartMs = timestamp("UTC", curYear, curMonth, curDay, 0, 0, 0)
-        int targetDayMs = todayStartMs - dayOffset * dayMs
-
-        // Extract year/month/day from the target timestamp
-        int tgtYear  = year(targetDayMs, "UTC")
-        int tgtMonth = month(targetDayMs, "UTC")
-        int tgtDay   = dayofmonth(targetDayMs, "UTC")
-
-        // For each city
-        for c = 0 to numCities - 1
-            bool enabled = array.get(city_enabled, c)
-            string cname = array.get(city_names, c)
-            float lat = array.get(city_lats, c)
-            float lon = array.get(city_lons, c)
-            float stdOff = array.get(city_offsets, c)
-            int dstType = array.get(city_dst, c)
-            bool dstOn = array.get(city_dst_on, c)
-            color clr = array.get(city_colors, c)
-            int transp = array.get(city_transp, c)
-
-            // Calculate effective offset
-            float effOffset = getEffectiveOffset(stdOff, dstType, dstOn, tgtYear, tgtMonth, tgtDay)
-
-            // Calculate sunrise UTC
-            float sunriseUTC = getSunriseUTC(lat, lon, tgtYear, tgtMonth, tgtDay)
-            float sunriseLocal = utcToLocal(sunriseUTC, effOffset)
-
-            // Get sunrise timestamp in ms (UTC)
-            int sunriseTs = getSunriseTimestamp(targetDayMs, sunriseUTC)
-
-            // Find the 1-min candle at sunrise for current symbol
-            [zHigh, zLow] = findMinuteCandle(min1_times, min1_highs, min1_lows, sunriseTs)
-
-            // Find the 1-min candle at sunrise for compare symbol
-            [czHigh, czLow] = findMinuteCandle(cmp_min1_times, cmp_min1_highs, cmp_min1_lows, sunriseTs)
-
-            if enabled and not na(zHigh) and not na(zLow)
-                // Draw the zone box
-                color boxColor = color.new(clr, transp)
-                box zoneBox = box.new(sunriseTs, zHigh, sunriseTs + dayMs, zLow,
-                     bgcolor=boxColor, border_color=color.new(clr, math.max(0, transp - 20)),
-                     border_width=1, extend=extend.right, xloc=xloc.bar_time)
-                array.push(allBoxes, zoneBox)
-
-                // Label at the left edge of the box
-                label zoneLabel = label.new(sunriseTs, zHigh, cname,
-                     style=label.style_none, textcolor=clr,
-                     size=size.tiny, xloc=xloc.bar_time)
-                array.push(allLabels, zoneLabel)
-
-            // Store table data (only for today, dayOffset==0)
-            if dayOffset == 0
-                array.push(tbl_city_names, cname)
-                array.push(tbl_enabled, enabled and not na(zHigh))
-                int srHour = math.floor(sunriseLocal)
-                int srMin = math.round((sunriseLocal - srHour) * 60.0)
-                string hrStr = srHour < 10 ? "0" + str.tostring(srHour) : str.tostring(srHour)
-                string mnStr = srMin < 10 ? "0" + str.tostring(srMin) : str.tostring(srMin)
-                string srStr = hrStr + ":" + mnStr
-                array.push(tbl_sunrise_times, srStr)
-                array.push(tbl_highs, enabled ? zHigh : na)
-                array.push(tbl_lows, enabled ? zLow : na)
+        array.push(tbl_city_names, cname)
+        array.push(tbl_enabled, enabled and not na(todayHigh))
+        int srHour = math.floor(sunriseLocal)
+        int srMin  = math.round((sunriseLocal - srHour) * 60.0)
+        string hrStr = srHour < 10 ? "0" + str.tostring(srHour) : str.tostring(srHour)
+        string mnStr = srMin < 10 ? "0" + str.tostring(srMin) : str.tostring(srMin)
+        array.push(tbl_sunrise_times, hrStr + ":" + mnStr)
+        array.push(tbl_highs, enabled ? todayHigh : na)
+        array.push(tbl_lows, enabled ? todayLow : na)
 
 // ============================================================================
 // SECTION 11: SMT DIVERGENCE (Swing-Based)
