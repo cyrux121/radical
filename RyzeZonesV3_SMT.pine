@@ -127,61 +127,86 @@ smt_line_style = smt_line_style_in == "Solid" ? line.style_solid :
 // SECTION 5: ASTRONOMICAL SUNRISE FUNCTIONS
 // ============================================================================
 
-// --- 5a: Day of Year ---
-// Converts year/month/day to integer 1-365 (ignores leap second).
-getDayOfYear(int y, int m, int d) =>
-    // Days in each month (non-leap). Leap adjustment added below.
-    int result = d
-    if m > 1
-        result += 31
-    if m > 2
-        result += 28
-        // Leap year check
-        if (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0)
-            result += 1
-    if m > 3
-        result += 31
-    if m > 4
-        result += 30
-    if m > 5
-        result += 31
-    if m > 6
-        result += 30
-    if m > 7
-        result += 31
-    if m > 8
-        result += 31
-    if m > 9
-        result += 30
-    if m > 10
-        result += 31
-    if m > 11
-        result += 30
-    result
+// --- 5a: Julian Day Number ---
+// Converts calendar date to Julian Day (standard astronomical calculation).
+getJulianDay(int y, int m, int d) =>
+    int yy = m <= 2 ? y - 1 : y
+    int mm = m <= 2 ? m + 12 : m
+    int A = math.floor(yy / 100.0)
+    int B_jd = 2 - A + math.floor(A / 4.0)
+    float JD = math.floor(365.25 * (yy + 4716)) + math.floor(30.6001 * (mm + 1)) + d + B_jd - 1524.5
+    JD
 
-// --- 5b: Solar Declination (Spencer's Fourier Series) ---
+// --- 5b: Julian Century from Julian Day ---
+getJulianCentury(float JD) =>
+    float T = (JD - 2451545.0) / 36525.0
+    T
+
+// --- 5c: NOAA Solar Declination ---
+// Uses full NOAA algorithm for high accuracy (~±0.01 degrees).
 // Returns declination in degrees.
-getSolarDeclination(int doy) =>
-    float B = (2.0 * math.pi / 365.0) * (doy - 1)
-    float decl_rad = 0.006918 - 0.399912 * math.cos(B) +
-         0.070257 * math.sin(B) - 0.006758 * math.cos(2.0 * B) +
-         0.000907 * math.sin(2.0 * B) - 0.002697 * math.cos(3.0 * B) +
-         0.00148 * math.sin(3.0 * B)
-    float decl_deg = decl_rad * (180.0 / math.pi)
+getSolarDeclination(float T) =>
+    // Geometric mean longitude of sun (degrees)
+    float L0_raw = 280.46646 + T * (36000.76983 + 0.0003032 * T)
+    float L0 = L0_raw % 360.0
+    if L0 < 0.0
+        L0 += 360.0
+    // Geometric mean anomaly of sun (degrees)
+    float M = 357.52911 + T * (35999.05029 - 0.0001537 * T)
+    float M_rad = M * math.pi / 180.0
+    // Equation of center
+    float C = math.sin(M_rad) * (1.914602 - T * (0.004817 + 0.000014 * T)) +
+         math.sin(2.0 * M_rad) * (0.019993 - 0.000101 * T) +
+         math.sin(3.0 * M_rad) * 0.000289
+    // Sun true longitude and apparent longitude
+    float theta = L0 + C
+    float omega = 125.04 - 1934.136 * T
+    float omega_rad = omega * math.pi / 180.0
+    float lambda_val = theta - 0.00569 - 0.00478 * math.sin(omega_rad)
+    float lambda_rad = lambda_val * math.pi / 180.0
+    // Obliquity of ecliptic with nutation correction
+    float epsilon0 = 23.0 + (26.0 + (21.448 - T * (46.815 + T * (0.00059 - T * 0.001813))) / 60.0) / 60.0
+    float epsilon = epsilon0 + 0.00256 * math.cos(omega_rad)
+    float epsilon_rad = epsilon * math.pi / 180.0
+    // Solar declination
+    float sin_decl = math.sin(epsilon_rad) * math.sin(lambda_rad)
+    float decl_deg = math.asin(sin_decl) * 180.0 / math.pi
     decl_deg
 
-// --- 5c: Equation of Time (Spencer's approximation) ---
+// --- 5d: NOAA Equation of Time ---
+// Uses full NOAA algorithm for high accuracy (~±0.5 minutes).
 // Returns EoT in minutes.
-getEquationOfTime(int doy) =>
-    float B = (2.0 * math.pi / 365.0) * (doy - 1)
-    float eot = 229.18 * (0.000075 + 0.001868 * math.cos(B) -
-         0.032077 * math.sin(B) - 0.014615 * math.cos(2.0 * B) -
-         0.04089 * math.sin(2.0 * B))
+getEquationOfTime(float T) =>
+    // Geometric mean longitude of sun (degrees)
+    float L0_raw = 280.46646 + T * (36000.76983 + 0.0003032 * T)
+    float L0 = L0_raw % 360.0
+    if L0 < 0.0
+        L0 += 360.0
+    // Geometric mean anomaly (degrees)
+    float M = 357.52911 + T * (35999.05029 - 0.0001537 * T)
+    // Eccentricity of Earth's orbit
+    float e = 0.016708634 - T * (0.000042037 + 0.0000001267 * T)
+    // Obliquity
+    float omega = 125.04 - 1934.136 * T
+    float omega_rad = omega * math.pi / 180.0
+    float epsilon0 = 23.0 + (26.0 + (21.448 - T * (46.815 + T * (0.00059 - T * 0.001813))) / 60.0) / 60.0
+    float epsilon = epsilon0 + 0.00256 * math.cos(omega_rad)
+    float epsilon_rad = epsilon * math.pi / 180.0
+    // y = tan^2(epsilon/2)
+    float y_val = math.pow(math.tan(epsilon_rad / 2.0), 2)
+    float L0_rad = L0 * math.pi / 180.0
+    float M_rad = M * math.pi / 180.0
+    // EoT in radians, then convert to minutes
+    float eot_rad = y_val * math.sin(2.0 * L0_rad) -
+         2.0 * e * math.sin(M_rad) +
+         4.0 * e * y_val * math.sin(M_rad) * math.cos(2.0 * L0_rad) -
+         0.5 * y_val * y_val * math.sin(4.0 * L0_rad) -
+         1.25 * e * e * math.sin(2.0 * M_rad)
+    float eot = 4.0 * eot_rad * 180.0 / math.pi  // radians to degrees, then *4 = minutes
     eot
 
-// --- 5d: Hour Angle for Sunrise ---
+// --- 5e: Hour Angle for Sunrise ---
 // Returns hour angle in degrees. Uses -0.833 deg for atmospheric refraction.
-// Returns na if the sun never rises (polar regions).
 getHourAngle(float lat_deg, float decl_deg) =>
     float lat_rad = lat_deg * (math.pi / 180.0)
     float decl_rad = decl_deg * (math.pi / 180.0)
@@ -194,23 +219,25 @@ getHourAngle(float lat_deg, float decl_deg) =>
     float ha_deg = ha_rad * (180.0 / math.pi)
     ha_deg
 
-// --- 5e: Sunrise in UTC hours ---
+// --- 5f: Sunrise in UTC hours ---
+// Uses NOAA formula: Sunrise (minutes UTC) = 720 - 4*longitude - EoT - HA*4
 // Returns sunrise time as a float in hours (0.0 - 24.0 UTC).
-getSunriseUTC(float lat, float lon, int doy) =>
-    float decl = getSolarDeclination(doy)
-    float eot = getEquationOfTime(doy)
+getSunriseUTC(float lat, float lon, int yr, int mo, int dy) =>
+    float JD = getJulianDay(yr, mo, dy)
+    float T = getJulianCentury(JD)
+    float decl = getSolarDeclination(T)
+    float eot = getEquationOfTime(T)
     float ha = getHourAngle(lat, decl)
-    float sunriseLocalSolar = 12.0 - (ha / 15.0)
-    float sunriseLocalMean = sunriseLocalSolar - (eot / 60.0)
-    float longitudeCorrection = -lon / 15.0
-    float sunriseUTC = sunriseLocalMean + longitudeCorrection
+    // NOAA sunrise formula (minutes from midnight UTC)
+    float sunriseMinutes = 720.0 - 4.0 * lon - eot - ha * 4.0
+    float sunriseHours = sunriseMinutes / 60.0
     // Normalize to 0-24
-    float normalized = sunriseUTC % 24.0
+    float normalized = sunriseHours % 24.0
     if normalized < 0.0
         normalized += 24.0
     normalized
 
-// --- 5f: UTC to Local Time ---
+// --- 5g: UTC to Local Time ---
 // Adds timezone offset (including DST) to UTC hours.
 utcToLocal(float utcHours, float tzOffset) =>
     float localHours = utcHours + tzOffset
@@ -220,7 +247,7 @@ utcToLocal(float utcHours, float tzOffset) =>
         normalized += 24.0
     normalized
 
-// --- 5g: Convert sunrise hour to Unix timestamp for a given date ---
+// --- 5h: Convert sunrise hour to Unix timestamp for a given date ---
 // dateTimestamp = timestamp of the start of the day in UTC (00:00:00 UTC).
 // sunriseUTCHours = sunrise time in UTC hours (float).
 // Returns Unix timestamp in milliseconds.
@@ -500,7 +527,6 @@ if barstate.islast
         int tgtYear  = year(targetDayMs, "UTC")
         int tgtMonth = month(targetDayMs, "UTC")
         int tgtDay   = dayofmonth(targetDayMs, "UTC")
-        int doy = getDayOfYear(tgtYear, tgtMonth, tgtDay)
 
         // For each city
         for c = 0 to numCities - 1
@@ -518,7 +544,7 @@ if barstate.islast
             float effOffset = getEffectiveOffset(stdOff, dstType, dstOn, tgtYear, tgtMonth, tgtDay)
 
             // Calculate sunrise UTC
-            float sunriseUTC = getSunriseUTC(lat, lon, doy)
+            float sunriseUTC = getSunriseUTC(lat, lon, tgtYear, tgtMonth, tgtDay)
             float sunriseLocal = utcToLocal(sunriseUTC, effOffset)
 
             // Get sunrise timestamp in ms (UTC)
