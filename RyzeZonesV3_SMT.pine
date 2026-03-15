@@ -107,7 +107,9 @@ smt_symbol_choice = input.string("NQ1!", "Compare Symbol",
      options=["ES1!", "NQ1!", "YM1!", "RTY1!", "SPY", "QQQ", "DIA", "IWM", "Custom"],
      group="RYZE SMT")
 smt_custom_symbol = input.string("", "Custom Symbol", group="RYZE SMT")
-smt_color         = input.color(color.white, "SMT Line Color", group="RYZE SMT")
+smt_swing_len     = input.int(5, "Swing Lookback", minval=2, maxval=50, group="RYZE SMT")
+smt_bull_color    = input.color(color.green, "Bullish SMT Color", group="RYZE SMT")
+smt_bear_color    = input.color(color.red, "Bearish SMT Color", group="RYZE SMT")
 smt_line_style_in = input.string("Dashed", "Line Style",
      options=["Solid", "Dashed", "Dotted"], group="RYZE SMT")
 smt_line_width    = input.int(1, "Line Width", minval=1, maxval=4, group="RYZE SMT")
@@ -423,14 +425,6 @@ if not na(cmp_m1_t)
 var array<box>   allBoxes  = array.new<box>(0)
 var array<label> allLabels = array.new<label>(0)
 
-// Persistent arrays to hold zone highs/lows for SMT tap detection (current symbol)
-var array<float> zone_highs = array.new<float>(0)
-var array<float> zone_lows  = array.new<float>(0)
-
-// Persistent arrays for compare symbol zone highs/lows
-var array<float> cmp_zone_highs = array.new<float>(0)
-var array<float> cmp_zone_lows  = array.new<float>(0)
-
 // Table data arrays (for the info table) — store data for each city
 var array<string> tbl_city_names    = array.new<string>(0)
 var array<string> tbl_sunrise_times = array.new<string>(0)
@@ -476,12 +470,6 @@ if barstate.islast
         box.delete(array.pop(allBoxes))
     while array.size(allLabels) > 0
         label.delete(array.pop(allLabels))
-
-    // Clear zone arrays for SMT
-    array.clear(zone_highs)
-    array.clear(zone_lows)
-    array.clear(cmp_zone_highs)
-    array.clear(cmp_zone_lows)
 
     // Clear table data
     array.clear(tbl_city_names)
@@ -570,15 +558,6 @@ if barstate.islast
                      size=size.tiny, xloc=xloc.bar_time)
                 array.push(allLabels, zoneLabel)
 
-                // Store zone levels for SMT
-                array.push(zone_highs, zHigh)
-                array.push(zone_lows, zLow)
-
-            // Store compare symbol zone levels for SMT (regardless of current symbol enabled)
-            if show_smt and not na(czHigh) and not na(czLow)
-                array.push(cmp_zone_highs, czHigh)
-                array.push(cmp_zone_lows, czLow)
-
             // Store table data (only for today, dayOffset==0)
             if dayOffset == 0
                 array.push(tbl_city_names, cname)
@@ -593,91 +572,81 @@ if barstate.islast
                 array.push(tbl_lows, enabled ? zLow : na)
 
 // ============================================================================
-// SECTION 11: SMT LOGIC
+// SECTION 11: SMT DIVERGENCE (Swing-Based)
 // ============================================================================
 
-// SMT runs on every bar (not just last), but we need zone levels.
-// Since zones are drawn on barstate.islast, for SMT we use a simplified approach:
-// We calculate today's zones inline and check taps.
+// Detect swing highs/lows on both instruments via pivots.
+// Bearish SMT: main makes Higher High while compare makes Lower High.
+// Bullish SMT: main makes Lower Low while compare makes Higher Low.
+// Draws a diagonal line connecting the two swing points on the main chart.
 
-// For SMT to work on each bar, we compute zone levels for today's sunrise candles.
-// We re-derive sunrise timestamps and look up the 1-min candles.
+// Pivot detection — returns value smt_swing_len bars ago once confirmed
+mainPH = ta.pivothigh(high, smt_swing_len, smt_swing_len)
+mainPL = ta.pivotlow(low, smt_swing_len, smt_swing_len)
+cmpPH  = ta.pivothigh(cmp_h, smt_swing_len, smt_swing_len)
+cmpPL  = ta.pivotlow(cmp_l, smt_swing_len, smt_swing_len)
 
-// Persistent SMT line storage for cleanup
-var array<line>  smt_lines  = array.new<line>(0)
-var array<label> smt_labels_arr = array.new<label>(0)
+// Track last two swing highs — main instrument
+var float mainPrevHigh    = na
+var float mainLastHigh    = na
+var int   mainPrevHighIdx = na
+var int   mainLastHighIdx = na
 
-// SMT detection — only on barstate.islast to avoid excess drawing
-if barstate.islast and show_smt and str.length(smt_symbol_raw) > 0 and smt_symbol != currentTickerStd
-    // We already have zone_highs/zone_lows and cmp_zone_highs/cmp_zone_lows from above.
-    // Check if the current bar taps any current symbol zone
-    bool curTaps = false
-    int curTapIdx = -1
-    float curTapZoneHigh = na
-    float curTapZoneLow = na
-    int zoneCount = array.size(zone_highs)
-    if zoneCount > 0
-        for i = 0 to zoneCount - 1
-            float zh = array.get(zone_highs, i)
-            float zl = array.get(zone_lows, i)
-            if not na(zh) and not na(zl)
-                if low <= zh and high >= zl
-                    curTaps := true
-                    curTapIdx := i
-                    curTapZoneHigh := zh
-                    curTapZoneLow := zl
-                    break
+// Track last two swing lows — main instrument
+var float mainPrevLow    = na
+var float mainLastLow    = na
+var int   mainPrevLowIdx = na
+var int   mainLastLowIdx = na
 
-    // Check if compare symbol taps any of ITS zones
-    bool cmpTaps = false
-    int cmpZoneCount = array.size(cmp_zone_highs)
-    if cmpZoneCount > 0
-        for i = 0 to cmpZoneCount - 1
-            float czh = array.get(cmp_zone_highs, i)
-            float czl = array.get(cmp_zone_lows, i)
-            if not na(czh) and not na(czl)
-                if cmp_l <= czh and cmp_h >= czl
-                    cmpTaps := true
-                    break
+// Track last two swing highs — compare instrument
+var float cmpPrevHigh = na
+var float cmpLastHigh = na
 
-    // SMT fires when one taps and the other does not
-    if curTaps and not cmpTaps
-        // Current symbol tapped a zone, compare did not => SMT divergence
-        // Determine if price came from above or below
-        float zoneMid = (curTapZoneHigh + curTapZoneLow) / 2.0
-        float lineLevel = close > zoneMid ? low : high
+// Track last two swing lows — compare instrument
+var float cmpPrevLow = na
+var float cmpLastLow = na
 
-        line smtLine = line.new(time, lineLevel, time + 86400000, lineLevel,
-             xloc=xloc.bar_time, color=smt_color,
-             style=smt_line_style, width=smt_line_width, extend=extend.right)
-        array.push(smt_lines, smtLine)
+// Update main swing highs
+if not na(mainPH)
+    mainPrevHigh    := mainLastHigh
+    mainPrevHighIdx := mainLastHighIdx
+    mainLastHigh    := mainPH
+    mainLastHighIdx := bar_index - smt_swing_len
 
-        label smtLbl = label.new(time, lineLevel, "Ryze SMT",
-             xloc=xloc.bar_time, style=label.style_none,
-             textcolor=smt_color, size=size.small)
-        array.push(smt_labels_arr, smtLbl)
+// Update compare swing highs
+if not na(cmpPH)
+    cmpPrevHigh := cmpLastHigh
+    cmpLastHigh := cmpPH
 
-    else if cmpTaps and not curTaps
-        // Compare tapped but current did not => also SMT divergence
-        // Use current symbol's price level where the non-tap occurred
-        float lineLevel = (high + low) / 2.0
-        line smtLine = line.new(time, lineLevel, time + 86400000, lineLevel,
-             xloc=xloc.bar_time, color=smt_color,
-             style=smt_line_style, width=smt_line_width, extend=extend.right)
-        array.push(smt_lines, smtLine)
+// Update main swing lows
+if not na(mainPL)
+    mainPrevLow    := mainLastLow
+    mainPrevLowIdx := mainLastLowIdx
+    mainLastLow    := mainPL
+    mainLastLowIdx := bar_index - smt_swing_len
 
-        label smtLbl = label.new(time, lineLevel, "Ryze SMT",
-             xloc=xloc.bar_time, style=label.style_none,
-             textcolor=smt_color, size=size.small)
-        array.push(smt_labels_arr, smtLbl)
+// Update compare swing lows
+if not na(cmpPL)
+    cmpPrevLow := cmpLastLow
+    cmpLastLow := cmpPL
 
-    // Cleanup: cap SMT lines at 450 to stay within 500 limit
-    while array.size(smt_lines) > 450
-        line.delete(array.get(smt_lines, 0))
-        array.shift(smt_lines)
-    while array.size(smt_labels_arr) > 450
-        label.delete(array.get(smt_labels_arr, 0))
-        array.shift(smt_labels_arr)
+// --- Bearish SMT: Main Higher High + Compare Lower High ---
+if show_smt and not na(mainPH) and not na(mainPrevHigh) and not na(mainPrevHighIdx) and not na(cmpLastHigh) and not na(cmpPrevHigh)
+    if mainLastHigh > mainPrevHigh and cmpLastHigh < cmpPrevHigh
+        line.new(mainPrevHighIdx, mainPrevHigh, mainLastHighIdx, mainLastHigh,
+             color=smt_bear_color, style=smt_line_style, width=smt_line_width)
+        label.new(mainLastHighIdx, mainLastHigh, "SMT",
+             style=label.style_label_down, textcolor=color.white,
+             color=smt_bear_color, size=size.tiny)
+
+// --- Bullish SMT: Main Lower Low + Compare Higher Low ---
+if show_smt and not na(mainPL) and not na(mainPrevLow) and not na(mainPrevLowIdx) and not na(cmpLastLow) and not na(cmpPrevLow)
+    if mainLastLow < mainPrevLow and cmpLastLow > cmpPrevLow
+        line.new(mainPrevLowIdx, mainPrevLow, mainLastLowIdx, mainLastLow,
+             color=smt_bull_color, style=smt_line_style, width=smt_line_width)
+        label.new(mainLastLowIdx, mainLastLow, "SMT",
+             style=label.style_label_up, textcolor=color.white,
+             color=smt_bull_color, size=size.tiny)
 
 // ============================================================================
 // SECTION 12: INFORMATION TABLE
